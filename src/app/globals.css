@@ -1,8 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0a;
+  --foreground: #e2e8f0;
+  --primary: #8b5cf6;
+  --primary-dark: #7c3aed;
+  --secondary: #a855f7;
+  --accent: #c084fc;
+  --surface: #1a1a1a;
+  --surface-light: #2d2d2d;
+  --border: #374151;
+  --text-muted: #9ca3af;
 }
 
 @theme inline {
@@ -12,15 +20,41 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Remove white backgrounds from player images */
+.player-image {
+  filter: drop-shadow(2px 2px 4px rgba(139, 92, 246, 0.5));
+  mix-blend-mode: multiply;
+}
+
+/* Alternative white background removal using CSS filters */
+.remove-white-bg {
+  filter: 
+    contrast(1.2) 
+    brightness(1.1) 
+    drop-shadow(2px 2px 4px rgba(139, 92, 246, 0.5));
+  mix-blend-mode: multiply;
+}
+
+/* Custom scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-dark);
 }

@@ -19,8 +19,9 @@ export default function GamePage() {
   const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, diving: false });
   const [result, setResult] = useState('');
   const [stats, setStats] = useState({ goals: 0, streak: 0, shots: 0, best: 0 });
+  const [shotHistory, setShotHistory] = useState([]); // Track all shots
   const [shotTarget, setShotTarget] = useState(null);
-  const [ballTrajectory, setBallTrajectory] = useState([]);
+  const [ballTrajectory, setBallTrajectory] = useState(null);
 
   const resetGame = useCallback(() => {
     setTimeout(() => {
@@ -31,9 +32,25 @@ export default function GamePage() {
       setGoalkeeperPosition({ x: 50, diving: false });
       setResult('');
       setShotTarget(null);
-      setBallTrajectory([]);
+      setBallTrajectory(null);
     }, 2500);
   }, []);
+
+  // Convert 3D target to 2D chart position (goal view from behind)
+  const targetToChartPosition = (target) => {
+    // Goal dimensions: 7.32m wide x 2.44m high
+    const goalWidth = 7.32;
+    const goalHeight = 2.44;
+    
+    // Convert to percentage position in goal
+    const xPercent = ((target.x + goalWidth/2) / goalWidth) * 100;
+    const yPercent = ((goalHeight - target.y) / goalHeight) * 100;
+    
+    return {
+      x: Math.max(0, Math.min(100, xPercent)),
+      y: Math.max(0, Math.min(100, yPercent))
+    };
+  };
 
   // Convert screen coordinates to 3D field coordinates
   const screenToField = (screenX, screenY) => {
@@ -121,18 +138,22 @@ export default function GamePage() {
     
     console.log('Click:', { screenX: clickX, screenY: clickY }, 'Target:', target);
 
-    setShotTarget(target);
     animateShot(target);
   };
 
   const animateShot = (target) => {
+    // Set states first
     setGameState('shooting');
     setPlayerState('shooting');
+    setShotTarget(target);
 
     // Calculate trajectory points for realistic ball movement
     const startPos = { x: 0, y: 0, z: 11 }; // Penalty spot
     const trajectory = calculateTrajectory(startPos, target);
     setBallTrajectory(trajectory);
+
+    // Start ball animation immediately
+    animateBallTrajectory(trajectory);
 
     // Goalkeeper decision
     const goalkeeperMoves = ['left', 'center', 'right'];
@@ -141,13 +162,13 @@ export default function GamePage() {
     if (target.x < -2) gkMove = 'left';
     else if (target.x > 2) gkMove = 'right';
     
+    // Player follow-through after a short delay
     setTimeout(() => {
       setPlayerState('follow-through');
-      
-      // Start ball animation
-      animateBallTrajectory(trajectory);
-      
-      // Goalkeeper reaction
+    }, 200);
+
+    // Goalkeeper reaction after slight delay
+    setTimeout(() => {
       let gkTargetX = 50;
       if (gkMove === 'left') gkTargetX = 35;
       else if (gkMove === 'right') gkTargetX = 65;
@@ -158,8 +179,7 @@ export default function GamePage() {
         diving: true,
         direction: gkMove
       });
-      
-    }, 300);
+    }, 150);
 
     setTimeout(() => {
       // Determine result
@@ -175,6 +195,15 @@ export default function GamePage() {
       }
       
       setResult(resultText);
+      
+      // Add shot to history
+      setShotHistory(prev => [...prev, {
+        id: Date.now(),
+        target: target,
+        result: resultText,
+        isGoal: isGoal,
+        timestamp: new Date()
+      }]);
       
       // Update stats
       if (isGoal) {
@@ -198,33 +227,82 @@ export default function GamePage() {
   };
 
   const calculateTrajectory = (start, end) => {
-    const points = [];
-    const steps = 25;
+    // Calculate initial velocity components needed to reach target
+    const deltaX = end.x - start.x;
+    const deltaZ = end.z - start.z; // Distance to goal
+    const deltaY = end.y - start.y;
     
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      
-      // Linear interpolation for x and z
-      const x = start.x + (end.x - start.x) * t;
-      const z = start.z + (end.z - start.z) * t;
-      
-      // Parabolic trajectory for y (height)
-      const y = start.y + (end.y - start.y) * t + 
-                2 * Math.max(end.y, 1) * t * (1 - t); // Natural arc
-      
-      points.push({ x, y, z });
-    }
+    // Time of flight (based on distance and desired speed)
+    const distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+    const timeOfFlight = Math.max(0.8, Math.min(1.2, distance / 15)); // 0.8-1.2 seconds based on distance
     
-    return points;
+    // Initial velocity components
+    const vx0 = deltaX / timeOfFlight;
+    const vz0 = deltaZ / timeOfFlight;
+    
+    // Gravity constant (m/s²)
+    const gravity = 9.81;
+    
+    // Initial Y velocity to reach target height considering gravity
+    const vy0 = (deltaY / timeOfFlight) + (0.5 * gravity * timeOfFlight);
+    
+    return {
+      vx0, vy0, vz0,
+      timeOfFlight,
+      gravity,
+      startTime: null
+    };
   };
 
   const animateBallTrajectory = (trajectory) => {
-    trajectory.forEach((point, index) => {
-      setTimeout(() => {
-        const screenPos = fieldToScreen(point.x, point.z, point.y);
+    const startPos = { x: 0, y: 0, z: 11 }; // Penalty spot
+    let animationId;
+    
+    const animate = (currentTime) => {
+      if (!trajectory.startTime) {
+        trajectory.startTime = currentTime;
+      }
+      
+      const elapsed = (currentTime - trajectory.startTime) / 1000; // Convert to seconds
+      const progress = elapsed / trajectory.timeOfFlight;
+      
+      if (progress <= 1) {
+        // Physics-based position calculation
+        const currentX = startPos.x + trajectory.vx0 * elapsed;
+        const currentZ = startPos.z + trajectory.vz0 * elapsed;
+        const currentY = Math.max(0, 
+          startPos.y + 
+          trajectory.vy0 * elapsed - 
+          0.5 * trajectory.gravity * elapsed * elapsed
+        );
+        
+        const screenPos = fieldToScreen(currentX, currentZ, currentY);
         setBallPosition(screenPos);
-      }, index * 40);
-    });
+        
+        animationId = requestAnimationFrame(animate);
+      } else {
+        // Ball has reached target - ensure final position
+        const finalX = startPos.x + trajectory.vx0 * trajectory.timeOfFlight;
+        const finalZ = startPos.z + trajectory.vz0 * trajectory.timeOfFlight;
+        const finalY = Math.max(0,
+          startPos.y + 
+          trajectory.vy0 * trajectory.timeOfFlight - 
+          0.5 * trajectory.gravity * trajectory.timeOfFlight * trajectory.timeOfFlight
+        );
+        
+        const finalScreenPos = fieldToScreen(finalX, finalZ, finalY);
+        setBallPosition(finalScreenPos);
+      }
+    };
+    
+    animationId = requestAnimationFrame(animate);
+    
+    // Clean up function
+    return () => {
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+      }
+    };
   };
 
   const checkGoal = (target, gkMove) => {
@@ -445,7 +523,7 @@ export default function GamePage() {
           </div>
         )}
 
-        {        /* Shot Target Indicator */}
+        {/* Shot Target Indicator */}
         {shotTarget && gameState !== 'ready' && (
           <div 
             className="absolute w-4 h-4 border-2 border-yellow-400 rounded-full z-25"
@@ -457,6 +535,90 @@ export default function GamePage() {
             }}
           ></div>
         )}
+      </div>
+
+      {/* Shot Chart at Bottom */}
+      <div className="fixed bottom-0 left-0 right-0 bg-gray-900 bg-opacity-95 border-t-2 border-gray-700 p-2 z-40" 
+           style={{ transform: 'translateY(0px)' }}>
+        <div className="max-w-[1152px] mx-auto">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-white font-bold text-sm">📊 SHOT CHART</h3>
+            <div className="text-gray-300 text-sm">
+              {shotHistory.length} shots • {shotHistory.filter(s => s.isGoal).length} goals
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-3">
+            {/* Goal representation */}
+            <div className="relative bg-green-800 border-2 border-white rounded" 
+                 style={{ width: '240px', height: '96px' }}>
+              <div className="absolute inset-0 border border-gray-400 opacity-30"></div>
+              
+              {/* Goal posts */}
+              <div className="absolute left-0 top-0 bottom-0 w-1 bg-white"></div>
+              <div className="absolute right-0 top-0 bottom-0 w-1 bg-white"></div>
+              <div className="absolute top-0 left-0 right-0 h-1 bg-white"></div>
+              
+              {/* Shot markers */}
+              {shotHistory.slice(-20).map((shot) => { // Show last 20 shots
+                const pos = targetToChartPosition(shot.target);
+                const shotInGoal = isInGoal(shot.target.x, shot.target.y, shot.target.z);
+                
+                if (!shotInGoal) return null; // Only show shots that hit the goal area
+                
+                return (
+                  <div
+                    key={shot.id}
+                    className={`absolute w-2 h-2 rounded-full border transform -translate-x-1/2 -translate-y-1/2 ${
+                      shot.isGoal 
+                        ? 'bg-green-400 border-green-600' 
+                        : 'bg-red-400 border-red-600'
+                    }`}
+                    style={{
+                      left: `${pos.x}%`,
+                      top: `${pos.y}%`
+                    }}
+                    title={`${shot.result}`}
+                  />
+                );
+              })}
+              
+              <div className="absolute -bottom-5 left-1/2 transform -translate-x-1/2 text-white text-xs">
+                GOAL
+              </div>
+            </div>
+            
+            {/* Legend and recent shots list */}
+            <div className="flex-1 flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-1">
+                  <div className="w-2 h-2 bg-green-400 border border-green-600 rounded-full"></div>
+                  <span className="text-green-400 text-xs font-medium">GOAL</span>
+                </div>
+                <div className="flex items-center space-x-1">
+                  <div className="w-2 h-2 bg-red-400 border border-red-600 rounded-full"></div>
+                  <span className="text-red-400 text-xs font-medium">SAVE</span>
+                </div>
+              </div>
+              
+              {/* Recent shots */}
+              <div className="flex items-center space-x-1">
+                <span className="text-gray-400 text-xs mr-1">RECENT:</span>
+                {shotHistory.slice(-8).reverse().map((shot) => (
+                  <div
+                    key={shot.id}
+                    className={`w-1.5 h-4 rounded-sm ${
+                      shot.isGoal ? 'bg-green-400' : 
+                      shot.result.includes('SAVE') ? 'bg-red-400' : 
+                      'bg-yellow-400'
+                    }`}
+                    title={shot.result}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   );

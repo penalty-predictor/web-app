@@ -1,57 +1,64 @@
-"use client";
-import { COUNTRIES_48 } from "../lib/constants";
+'use client';
 
-// Country flag image URLs using flagcdn.com
-const COUNTRY_FLAGS: Record<string, string> = {
-  "Argentina": "https://flagcdn.com/ar.svg", "Australia": "https://flagcdn.com/au.svg", "Belgium": "https://flagcdn.com/be.svg", "Brazil": "https://flagcdn.com/br.svg",
-  "Canada": "https://flagcdn.com/ca.svg", "Croatia": "https://flagcdn.com/hr.svg", "Denmark": "https://flagcdn.com/dk.svg", "England": "https://flagcdn.com/gb-eng.svg",
-  "France": "https://flagcdn.com/fr.svg", "Germany": "https://flagcdn.com/de.svg", "Italy": "https://flagcdn.com/it.svg", "Japan": "https://flagcdn.com/jp.svg",
-  "Mexico": "https://flagcdn.com/mx.svg", "Morocco": "https://flagcdn.com/ma.svg", "Netherlands": "https://flagcdn.com/nl.svg", "Nigeria": "https://flagcdn.com/ng.svg",
-  "Portugal": "https://flagcdn.com/pt.svg", "Qatar": "https://flagcdn.com/qa.svg", "Saudi Arabia": "https://flagcdn.com/sa.svg", "South Korea": "https://flagcdn.com/kr.svg",
-  "Spain": "https://flagcdn.com/es.svg", "Sweden": "https://flagcdn.com/se.svg", "Switzerland": "https://flagcdn.com/ch.svg", "USA": "https://flagcdn.com/us.svg",
-  "Uruguay": "https://flagcdn.com/uy.svg", "Poland": "https://flagcdn.com/pl.svg", "Colombia": "https://flagcdn.com/co.svg", "Ecuador": "https://flagcdn.com/ec.svg",
-  "Chile": "https://flagcdn.com/cl.svg", "Peru": "https://flagcdn.com/pe.svg", "Ghana": "https://flagcdn.com/gh.svg", "Senegal": "https://flagcdn.com/sn.svg",
-  "Cameroon": "https://flagcdn.com/cm.svg", "Ivory Coast": "https://flagcdn.com/ci.svg", "Algeria": "https://flagcdn.com/dz.svg", "Tunisia": "https://flagcdn.com/tn.svg",
-  "Ukraine": "https://flagcdn.com/ua.svg", "Wales": "https://flagcdn.com/gb-wls.svg", "Scotland": "https://flagcdn.com/gb-sct.svg", "Turkey": "https://flagcdn.com/tr.svg",
-  "Iran": "https://flagcdn.com/ir.svg", "Iraq": "https://flagcdn.com/iq.svg", "Greece": "https://flagcdn.com/gr.svg", "Czechia": "https://flagcdn.com/cz.svg",
-  "Austria": "https://flagcdn.com/at.svg", "China": "https://flagcdn.com/cn.svg", "TBD": "https://flagcdn.com/xx.svg"
-};
+import { countries } from '../lib/countries';
+import { Country } from '../lib/types';
 
-type Props = {
-  label: string;
-  value: string;
-  onChange: (name: string) => void;
-};
+interface CountryGridProps {
+  selectedCountry: string | null;
+  onCountrySelect: (country: string) => void;
+}
 
-export default function CountryGrid({ label, value, onChange }: Props) {
+export const CountryGrid: React.FC<CountryGridProps> = ({ 
+  selectedCountry, 
+  onCountrySelect 
+}) => {
   return (
-    <div className="w-full">
-      <p className="mb-2 text-sm text-purple-300">{label}</p>
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
-        {COUNTRIES_48.map((c) => (
+    <div className="w-full max-w-4xl mx-auto">
+      <div className="grid grid-cols-4 gap-4 md:gap-6 lg:gap-8">
+        {countries.map((country) => (
           <button
-            key={c}
-            onClick={() => onChange(c)}
-            className={`h-12 rounded border text-xs px-2 overflow-hidden text-ellipsis flex flex-col items-center justify-center gap-1 transition-all duration-200
-              ${value === c 
-                ? "border-purple-500 bg-purple-600 text-white shadow-lg" 
-                : "border-gray-600 bg-gray-700 text-gray-300 hover:border-purple-400 hover:bg-gray-600 hover:text-white"
-              }`}
-            title={c}
+            key={country.code}
+            onClick={() => onCountrySelect(country.name)}
+            className={`group flex flex-col items-center p-4 rounded-lg transition-all duration-300 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${
+              selectedCountry === country.name
+                ? 'bg-purple-600/20 ring-2 ring-purple-500'
+                : 'hover:bg-white/10'
+            }`}
           >
-            <img 
-              src={COUNTRY_FLAGS[c] || "https://flagcdn.com/xx.svg"} 
-              alt={`${c} flag`}
-              className="w-4 h-3 object-cover rounded-sm"
-              onError={(e) => {
-                // Fallback to a generic flag if the image fails to load
-                e.currentTarget.src = "https://flagcdn.com/xx.svg";
-              }}
-            />
-            <span className="text-xs leading-tight">{c}</span>
+            <div className={`w-20 h-16 md:w-24 md:h-20 lg:w-32 lg:h-24 mb-3 rounded-lg overflow-hidden flex items-center justify-center transition-colors duration-300 ${
+              selectedCountry === country.name
+                ? 'bg-purple-600/30 ring-2 ring-purple-500'
+                : 'bg-white/20 group-hover:bg-white/30'
+            }`}>
+              <img
+                src={country.flag}
+                alt={`${country.name} flag`}
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  // Fallback to country code in a styled container
+                  const target = e.target as HTMLImageElement;
+                  target.style.display = 'none';
+                  const parent = target.parentElement;
+                  if (parent) {
+                    parent.innerHTML = `
+                      <div class="w-full h-full flex items-center justify-center bg-gradient-to-br from-blue-500 to-red-500 rounded-lg">
+                        <span class="text-white text-lg font-bold">${country.code}</span>
+                      </div>
+                    `;
+                  }
+                }}
+              />
+            </div>
+            <span className={`text-sm md:text-base font-medium text-center transition-colors duration-300 ${
+              selectedCountry === country.name
+                ? 'text-purple-300'
+                : 'text-white group-hover:text-purple-300'
+            }`}>
+              {country.name}
+            </span>
           </button>
         ))}
       </div>
     </div>
   );
-}
+};

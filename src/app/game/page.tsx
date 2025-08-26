@@ -10,16 +10,22 @@ export default function GamePage() {
   const searchParams = useSearchParams();
   const selectedCountry = searchParams.get('country');
 
-  // Redirect if no country
-  useEffect(() => {
-    if (!selectedCountry) window.location.href = '/';
-  }, [selectedCountry]);
+  useEffect(() => { if (!selectedCountry) window.location.href = '/'; }, [selectedCountry]);
 
   const countryName = selectedCountry || 'United States';
   const countryData = countries.find(c => c.name === countryName);
 
-  // Visual goal (CSS pixels) used for BOTH visuals and physics
+  // Visual goal (CSS px) used for BOTH visuals & physics
   const GOAL_CONFIG = { width: 500, height: 200, depth: 30 };
+
+  // Keeper tuning
+  const GK = {
+    reactionMs: 180,         // when the dive begins
+    decideMs: 1200,          // when result is decided
+    baseSaveProb: 0.55,      // baseline save chance when guessing correct third
+    snapToBallMs: 140,       // snap time window (visual only; we just update positions)
+    gloveYOffsetPct: -2,     // cosmetic offset to put glove on the ball (screen %)
+  };
 
   // --- DOM refs + measured layout (visual == physics) -------------------------
   const gameRef = useRef<HTMLDivElement>(null);
@@ -58,8 +64,11 @@ export default function GamePage() {
   const [gameState, setGameState] = useState<'ready' | 'aiming' | 'shooting' | 'scoring'>('ready');
   const [ballPosition, setBallPosition] = useState({ x: 50, y: 85 }); // % within game box
   const [playerState, setPlayerState] = useState<'ready' | 'shooting' | 'follow-through'>('ready');
+
+  // Keeper: x & y in screen %
   const [goalkeeperState, setGoalkeeperState] = useState<'ready' | 'diving-left' | 'diving-right'>('ready');
-  const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, diving: false }); // % within game box
+  const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, y: 50, diving: false });
+
   const [result, setResult] = useState('');
   const [stats, setStats] = useState({ goals: 0, streak: 0, shots: 0, best: 0 });
   const [shotHistory, setShotHistory] = useState<Array<{
@@ -75,18 +84,30 @@ export default function GamePage() {
     timeOfFlight: number; gravity: number; startTime: number | null;
   } | null>(null);
 
+  // Place idle keeper centered on goal line when layout is ready
+  useEffect(() => {
+    if (!layout.game || !layout.inner) return;
+    const idle = fieldToScreen(0, 0, 0);
+    setGoalkeeperPosition({ x: idle.x, y: idle.y, diving: false });
+  }, [layout.game, layout.inner]);
+
   const resetGame = useCallback(() => {
     setTimeout(() => {
       setGameState('ready');
       setBallPosition({ x: 50, y: 85 });
       setPlayerState('ready');
       setGoalkeeperState('ready');
-      setGoalkeeperPosition({ x: 50, diving: false });
+      if (layout.game && layout.inner) {
+        const idle = fieldToScreen(0, 0, 0);
+        setGoalkeeperPosition({ x: idle.x, y: idle.y, diving: false });
+      } else {
+        setGoalkeeperPosition({ x: 50, y: 50, diving: false });
+      }
       setResult('');
       setShotTarget(null);
       setBallTrajectory(null);
     }, 2500);
-  }, []);
+  }, [layout.game, layout.inner]);
 
   // --- Screen(px) -> Field (true inverse; no snapping) ------------------------
   const screenToField = (clientX: number, clientY: number) => {
@@ -96,19 +117,15 @@ export default function GamePage() {
     const halfWidth = GOAL_CONFIG.width / 2;
     const centerX = inner.left + inner.width / 2;
 
-    // X: linear map around goal center. Do NOT clamp; outside posts stays outside.
-    const xNormAroundCenter = (clientX - centerX) / (inner.width / 2); // can be < -1 or > 1
+    const xNormAroundCenter = (clientX - centerX) / (inner.width / 2);
     const fieldX = xNormAroundCenter * halfWidth;
 
-    // Below the goal face -> treat as on-field (z > 0)
     if (clientY > inner.bottom) {
       const fieldDepth = (clientY - inner.bottom) / (game.bottom - inner.bottom);
       return { x: fieldX, y: 0, z: Math.min(fieldDepth * 100, 100) };
     }
 
-    // Otherwise, project onto same plane as fieldToScreen (z≈0)
-    // Works for clicks above the crossbar too (y can be > height).
-    const yNorm = (inner.bottom - clientY) / inner.height; // can be <0 or >1
+    const yNorm = (inner.bottom - clientY) / inner.height;
     const fieldY = yNorm * GOAL_CONFIG.height;
 
     return { x: fieldX, y: fieldY, z: 0 };
@@ -123,13 +140,11 @@ export default function GamePage() {
     let pxX: number, pxY: number;
 
     if (fieldZ <= GOAL_CONFIG.depth) {
-      // Project onto inner goal face
-      const xNorm = (fieldX + halfWidth) / GOAL_CONFIG.width; // 0..1 (can be slightly <0 or >1, that's fine visually)
-      const yNorm = fieldY / GOAL_CONFIG.height;              // can be <0 or >1
+      const xNorm = (fieldX + halfWidth) / GOAL_CONFIG.width;
+      const yNorm = fieldY / GOAL_CONFIG.height;
       pxX = inner.left + xNorm * inner.width;
       pxY = inner.bottom - yNorm * inner.height;
     } else {
-      // On field; position below goal line proportionally
       const depthRatio = Math.min(fieldZ / 100, 1);
       const centerX = inner.left + inner.width / 2;
       pxX = centerX + (fieldX / halfWidth) * (inner.width / 2);
@@ -154,12 +169,41 @@ export default function GamePage() {
   // --- Input -----------------------------------------------------------------
   const handleGameClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (gameState !== 'ready') return;
-    if (!layout.game || !layout.inner) return; // ensure measured
+    if (!layout.game || !layout.inner) return;
     const target = screenToField(e.clientX, e.clientY);
     animateShot(target);
   };
 
-  // --- Shot animation / physics ---------------------------------------------
+  // --- Helpers for keeper thirds/targets -------------------------------------
+  const thirdCentersFieldX = () => {
+    const half = GOAL_CONFIG.width / 2;
+    // centers of left/center/right thirds across the goal mouth
+    return [-half * 0.66, 0, half * 0.66];
+  };
+
+  // Probability the keeper actually saves if he guessed the correct third
+  const saveProbability = (targetX:number, targetY:number, gkMove:'left'|'center'|'right') => {
+    const [leftC, centerC, rightC] = thirdCentersFieldX();
+    const center = gkMove === 'left' ? leftC : gkMove === 'right' ? rightC : centerC;
+    const half = GOAL_CONFIG.width / 2;
+    const distNorm = Math.min(Math.abs(targetX - center) / (half / 3), 1); // 0 at third center, 1 at edge
+    // Farther from guessed center -> lower chance; higher shots slightly harder
+    const heightFactor = 0.95 - 0.25 * (targetY / GOAL_CONFIG.height); // 0.95 (low) .. 0.70 (top)
+    const prob = GK.baseSaveProb * (1 - 0.7 * distNorm) * heightFactor;
+    return Math.max(0.05, Math.min(prob, 0.9));
+  };
+
+  const keeperGuessedThird = (x:number, gkMove:'left'|'center'|'right') => {
+    const half = GOAL_CONFIG.width / 2;
+    const left = x < -half * 0.33;
+    const right = x >  half * 0.33;
+    const center = !left && !right;
+    if (gkMove === 'left') return left;
+    if (gkMove === 'right') return right;
+    return center;
+  };
+
+  // --- Shot animation / physics + keeper contact WHEN saving -----------------
   const animateShot = (target: {x:number;y:number;z:number}) => {
     setGameState('shooting');
     setPlayerState('shooting');
@@ -170,26 +214,27 @@ export default function GamePage() {
     setBallTrajectory(trajectory);
     animateBallTrajectory(trajectory);
 
-    // GK decision by thirds using physical width
+    // Keeper guess by thirds
     const halfWidth = GOAL_CONFIG.width / 2;
     const thirds = halfWidth * 0.6;
     let gkMove: 'left'|'center'|'right' = 'center';
     if (target.x < -thirds) gkMove = 'left';
     else if (target.x > thirds) gkMove = 'right';
 
+    // Player follow-through
     setTimeout(() => setPlayerState('follow-through'), 200);
 
+    // Keeper dives toward the **center of the guessed third** (not to the ball yet)
     setTimeout(() => {
-      let gkTargetX = 50;
-      if (gkMove === 'left') gkTargetX = 35;
-      else if (gkMove === 'right') gkTargetX = 65;
+      const [leftC, centerC, rightC] = thirdCentersFieldX();
+      const diveFieldX = gkMove === 'left' ? leftC : gkMove === 'right' ? rightC : centerC;
+      const diveFieldY = GOAL_CONFIG.height * 0.45; // mid-height glove
+      const diveScreen = fieldToScreen(diveFieldX, 0, diveFieldY);
+      setGoalkeeperState(gkMove === 'left' ? 'diving-left' : gkMove === 'right' ? 'diving-right' : 'ready');
+      setGoalkeeperPosition({ x: diveScreen.x, y: diveScreen.y, diving: true });
+    }, GK.reactionMs);
 
-      setGoalkeeperState(gkMove === 'left' ? 'diving-left'
-                         : gkMove === 'right' ? 'diving-right'
-                         : 'ready');
-      setGoalkeeperPosition({ x: gkTargetX, diving: true });
-    }, 150);
-
+    // Decide outcome
     setTimeout(() => {
       const inGoalArea = isInGoal(target.x, target.y, target.z);
       let resultText = '';
@@ -202,8 +247,20 @@ export default function GamePage() {
         else                                     resultText = 'MISS!';
         isGoalScored = false;
       } else {
-        isGoalScored = checkGoal(target, gkMove);
+        // Keeper only has a chance if he guessed the correct third
+        const guessed = keeperGuessedThird(target.x, gkMove);
+        const saved = guessed && Math.random() < saveProbability(target.x, target.y, gkMove);
+        isGoalScored = !saved;
         resultText = isGoalScored ? 'GOAL!' : 'SAVED!';
+      }
+
+      if (!isGoalScored) {
+        // VISUAL CONTACT ONLY WHEN SAVED:
+        // snap keeper the last bit ONTO the ball and put the ball at the glove.
+        const shotScreenTarget = fieldToScreen(target.x, target.z, target.y);
+        const gloveY = shotScreenTarget.y + GK.gloveYOffsetPct;
+        setGoalkeeperPosition({ x: shotScreenTarget.x, y: gloveY, diving: true });
+        setBallPosition({ x: shotScreenTarget.x, y: gloveY });
       }
 
       setResult(resultText);
@@ -225,7 +282,7 @@ export default function GamePage() {
 
       setGameState('scoring');
       resetGame();
-    }, 1200);
+    }, GK.decideMs);
   };
 
   const calculateTrajectory = (start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }) => {
@@ -272,18 +329,6 @@ export default function GamePage() {
 
     animationId = requestAnimationFrame(animate);
     return () => { if (animationId) cancelAnimationFrame(animationId); };
-  };
-
-  const checkGoal = (target: {x:number;y:number;z:number}, gkMove: 'left'|'center'|'right') => {
-    // Only called if already in-goal-area
-    const gkReach = 80; // pixels in field units
-    let gkX = 0;
-    if (gkMove === 'left') gkX = -75;
-    else if (gkMove === 'right') gkX = 75;
-
-    const distance = Math.sqrt(Math.pow(target.x - gkX, 2) + Math.pow(target.y - 100, 2)); // GK hand height ~100
-    if (distance <= gkReach) return Math.random() < 0.3;
-    return true;
   };
 
   const getPlayerImage = () => {
@@ -403,17 +448,17 @@ export default function GamePage() {
           />
         </div>
 
-        {/* Goalkeeper */}
+        {/* Goalkeeper (left/top in %) */}
         <div
           className="absolute transition-all duration-700 ease-out z-15"
           style={{
             left: `${goalkeeperPosition.x}%`,
-            bottom: '50%',
-            transform: `translateX(-50%) translateY(40px) ${
+            top: `${goalkeeperPosition.y}%`,
+            transform: `translate(-50%, -50%) ${
               goalkeeperState === 'diving-left'
-                ? 'translateY(-20px) translateX(-30px) rotate(-15deg)'
+                ? 'rotate(-12deg)'
                 : goalkeeperState === 'diving-right'
-                ? 'translateY(-20px) translateX(30px) rotate(15deg)'
+                ? 'rotate(12deg)'
                 : ''
             }`,
           }}

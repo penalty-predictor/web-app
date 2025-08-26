@@ -1,32 +1,84 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { countries } from '../../lib/countries';
 
-// Mock countries data
-const countries = [
-  { name: 'United States', flag: 'https://flagcdn.com/w320/us.png' }
-];
+type Rect = { left:number; right:number; top:number; bottom:number; width:number; height:number };
 
 export default function GamePage() {
-  const selectedCountry = 'United States';
-  const countryData = countries.find(c => c.name === selectedCountry);
+  const searchParams = useSearchParams();
+  const selectedCountry = searchParams.get('country');
 
-  // Game state
-  const [gameState, setGameState] = useState('ready');
-  const [ballPosition, setBallPosition] = useState({ x: 50, y: 85 }); // Start at penalty spot
-  const [playerState, setPlayerState] = useState('ready');
-  const [goalkeeperState, setGoalkeeperState] = useState('ready');
-  const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, diving: false });
+  // Redirect if no country
+  useEffect(() => {
+    if (!selectedCountry) window.location.href = '/';
+  }, [selectedCountry]);
+
+  const countryName = selectedCountry || 'United States';
+  const countryData = countries.find(c => c.name === countryName);
+
+  // Visual goal (CSS pixels) used for BOTH visuals and physics
+  const GOAL_CONFIG = { width: 500, height: 200, depth: 30 };
+
+  // --- DOM refs + measured layout (visual == physics) -------------------------
+  const gameRef = useRef<HTMLDivElement>(null);
+  const goalRef = useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = useState<{ game?: Rect; goal?: Rect; inner?: Rect }>({});
+
+  // Must match Tailwind post/crossbar thickness (w-4/h-4 => 16px)
+  const POST_THICKNESS_PX = 16;
+  const CROSSBAR_THICKNESS_PX = 16;
+
+  const measure = useCallback(() => {
+    if (!gameRef.current || !goalRef.current) return;
+    const game = gameRef.current.getBoundingClientRect();
+    const goal = goalRef.current.getBoundingClientRect();
+    const inner: Rect = {
+      left: goal.left + POST_THICKNESS_PX,
+      right: goal.right - POST_THICKNESS_PX,
+      top: goal.top + CROSSBAR_THICKNESS_PX,
+      bottom: goal.bottom,
+      width: goal.width - POST_THICKNESS_PX * 2,
+      height: goal.height - CROSSBAR_THICKNESS_PX,
+    };
+    setLayout({ game, goal, inner });
+  }, []);
+
+  useLayoutEffect(() => {
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (gameRef.current) ro.observe(gameRef.current);
+    if (goalRef.current) ro.observe(goalRef.current);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [measure]);
+
+  // --- Game state -------------------------------------------------------------
+  const [gameState, setGameState] = useState<'ready' | 'aiming' | 'shooting' | 'scoring'>('ready');
+  const [ballPosition, setBallPosition] = useState({ x: 50, y: 85 }); // % within game box
+  const [playerState, setPlayerState] = useState<'ready' | 'shooting' | 'follow-through'>('ready');
+  const [goalkeeperState, setGoalkeeperState] = useState<'ready' | 'diving-left' | 'diving-right'>('ready');
+  const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, diving: false }); // % within game box
   const [result, setResult] = useState('');
   const [stats, setStats] = useState({ goals: 0, streak: 0, shots: 0, best: 0 });
-  const [shotHistory, setShotHistory] = useState([]); // Track all shots
-  const [shotTarget, setShotTarget] = useState(null);
-  const [ballTrajectory, setBallTrajectory] = useState(null);
+  const [shotHistory, setShotHistory] = useState<Array<{
+    id: number;
+    target: { x: number; y: number; z: number };
+    result: string;
+    isGoal: boolean;
+    timestamp: Date;
+  }>>([]);
+  const [shotTarget, setShotTarget] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [ballTrajectory, setBallTrajectory] = useState<{
+    vx0: number; vy0: number; vz0: number;
+    timeOfFlight: number; gravity: number; startTime: number | null;
+  } | null>(null);
 
   const resetGame = useCallback(() => {
     setTimeout(() => {
       setGameState('ready');
-      setBallPosition({ x: 50, y: 85 }); // Reset to penalty spot
+      setBallPosition({ x: 50, y: 85 });
       setPlayerState('ready');
       setGoalkeeperState('ready');
       setGoalkeeperPosition({ x: 50, diving: false });
@@ -36,293 +88,201 @@ export default function GamePage() {
     }, 2500);
   }, []);
 
-  // Convert 3D target to 2D chart position (goal view from behind)
-  const targetToChartPosition = (target) => {
-    // Goal dimensions: 7.32m wide x 2.44m high
-    const goalWidth = 7.32;
-    const goalHeight = 2.44;
-    
-    // Convert to percentage position in goal
-    const xPercent = ((target.x + goalWidth/2) / goalWidth) * 100;
-    const yPercent = ((goalHeight - target.y) / goalHeight) * 100;
-    
-    return {
-      x: Math.max(0, Math.min(100, xPercent)),
-      y: Math.max(0, Math.min(100, yPercent))
-    };
-  };
+  // --- Screen(px) -> Field (true inverse; no snapping) ------------------------
+  const screenToField = (clientX: number, clientY: number) => {
+    if (!layout.game || !layout.inner) return { x: 0, y: 0, z: 0 };
+    const { game, inner } = layout;
 
-  // Convert screen coordinates to 3D field coordinates
-  const screenToField = (screenX, screenY) => {
-    // Goal is positioned at screen coordinates roughly 25% to 75% width, 25% to 52% height
-    const goalScreenLeft = 25;  // Left goal post
-    const goalScreenRight = 75; // Right goal post
-    const goalScreenTop = 25;   // Top crossbar
-    const goalScreenBottom = 52; // Goal line
-    
-    // Map screen coordinates to goal coordinates
-    const goalX = ((screenX - 50) / 25) * 3.66; // -3.66 to +3.66 meters (half goal width)
-    
-    let goalY = 0;
-    let goalZ = 0;
-    
-    if (screenY >= goalScreenTop && screenY <= goalScreenBottom) {
-      // Click is in goal area
-      goalY = ((goalScreenBottom - screenY) / (goalScreenBottom - goalScreenTop)) * 2.44; // 0 to 2.44m height
-      goalZ = 0; // At goal line
-    } else if (screenY > goalScreenBottom) {
-      // Click is below goal (on field)
-      const fieldDepth = ((screenY - goalScreenBottom) / (85 - goalScreenBottom)) * 11; // 0 to 11m from goal
-      goalZ = Math.min(fieldDepth, 11);
-      goalY = 0; // Ground level
-    } else {
-      // Click is above goal
-      goalY = 2.44 + ((goalScreenTop - screenY) / goalScreenTop) * 2; // Above crossbar
-      goalZ = 0;
+    const halfWidth = GOAL_CONFIG.width / 2;
+    const centerX = inner.left + inner.width / 2;
+
+    // X: linear map around goal center. Do NOT clamp; outside posts stays outside.
+    const xNormAroundCenter = (clientX - centerX) / (inner.width / 2); // can be < -1 or > 1
+    const fieldX = xNormAroundCenter * halfWidth;
+
+    // Below the goal face -> treat as on-field (z > 0)
+    if (clientY > inner.bottom) {
+      const fieldDepth = (clientY - inner.bottom) / (game.bottom - inner.bottom);
+      return { x: fieldX, y: 0, z: Math.min(fieldDepth * 100, 100) };
     }
-    
-    return { x: goalX, y: Math.max(0, goalY), z: goalZ };
+
+    // Otherwise, project onto same plane as fieldToScreen (z≈0)
+    // Works for clicks above the crossbar too (y can be > height).
+    const yNorm = (inner.bottom - clientY) / inner.height; // can be <0 or >1
+    const fieldY = yNorm * GOAL_CONFIG.height;
+
+    return { x: fieldX, y: fieldY, z: 0 };
   };
 
-  // Convert 3D field coordinates back to screen coordinates
-  const fieldToScreen = (fieldX, fieldZ, fieldY = 0) => {
-    // Goal area screen boundaries
-    const goalScreenLeft = 25;
-    const goalScreenRight = 75;
-    const goalScreenTop = 25;
-    const goalScreenBottom = 52;
-    
-    // Convert field X to screen X
-    const screenX = 50 + (fieldX / 3.66) * 25;
-    
-    let screenY;
-    if (fieldZ <= 0.5) {
-      // Ball is at/near goal line
-      if (fieldY <= 2.44) {
-        // Ball is within goal height
-        screenY = goalScreenBottom - (fieldY / 2.44) * (goalScreenBottom - goalScreenTop);
-      } else {
-        // Ball is above goal
-        screenY = goalScreenTop - ((fieldY - 2.44) / 2) * goalScreenTop;
-      }
+  // --- Field -> Screen(%) (renderer) -----------------------------------------
+  const fieldToScreen = (fieldX: number, fieldZ: number, fieldY: number = 0) => {
+    if (!layout.game || !layout.inner) return { x: 50, y: 85 };
+    const { game, inner } = layout;
+    const halfWidth = GOAL_CONFIG.width / 2;
+
+    let pxX: number, pxY: number;
+
+    if (fieldZ <= GOAL_CONFIG.depth) {
+      // Project onto inner goal face
+      const xNorm = (fieldX + halfWidth) / GOAL_CONFIG.width; // 0..1 (can be slightly <0 or >1, that's fine visually)
+      const yNorm = fieldY / GOAL_CONFIG.height;              // can be <0 or >1
+      pxX = inner.left + xNorm * inner.width;
+      pxY = inner.bottom - yNorm * inner.height;
     } else {
-      // Ball is on field (moving toward goal)
-      const depthRatio = Math.min(fieldZ / 11, 1);
-      screenY = goalScreenBottom + depthRatio * (85 - goalScreenBottom);
-      
-      // Add height component for field shots
-      screenY -= (fieldY / 5) * 20; // Reduce Y for height
+      // On field; position below goal line proportionally
+      const depthRatio = Math.min(fieldZ / 100, 1);
+      const centerX = inner.left + inner.width / 2;
+      pxX = centerX + (fieldX / halfWidth) * (inner.width / 2);
+      pxY = inner.bottom + depthRatio * (game.bottom - inner.bottom)
+          - (fieldY / GOAL_CONFIG.height) * 20;
     }
-    
-    return { x: screenX, y: screenY };
+
+    const xPercent = ((pxX - game.left) / game.width) * 100;
+    const yPercent = ((pxY - game.top) / game.height) * 100;
+    return { x: xPercent, y: yPercent };
   };
 
-  const isInGoal = (fieldX, fieldY, fieldZ) => {
-    const goalHalfWidth = 3.66; // 7.32m / 2
-    const goalHeight = 2.44;
-    
-    return Math.abs(fieldX) <= goalHalfWidth && 
-           fieldY >= 0 && fieldY <= goalHeight && 
-           fieldZ <= 1; // Allow some margin for goal line
+  // --- Goal detection (matches visual inner rectangle) -----------------------
+  const isInGoal = (fieldX: number, fieldY: number, fieldZ: number) => {
+    const halfWidth = GOAL_CONFIG.width / 2;
+    const withinWidth  = Math.abs(fieldX) <= halfWidth;
+    const withinHeight = fieldY >= 0 && fieldY <= GOAL_CONFIG.height;
+    const atGoalLine   = fieldZ <= GOAL_CONFIG.depth;
+    return withinWidth && withinHeight && atGoalLine;
   };
 
-  const handleGameClick = (e) => {
+  // --- Input -----------------------------------------------------------------
+  const handleGameClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (gameState !== 'ready') return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = ((e.clientX - rect.left) / rect.width) * 100;
-    const clickY = ((e.clientY - rect.top) / rect.height) * 100;
-
-    // Convert click to 3D target
-    const target = screenToField(clickX, clickY);
-    
-    console.log('Click:', { screenX: clickX, screenY: clickY }, 'Target:', target);
-
+    if (!layout.game || !layout.inner) return; // ensure measured
+    const target = screenToField(e.clientX, e.clientY);
     animateShot(target);
   };
 
-  const animateShot = (target) => {
-    // Set states first
+  // --- Shot animation / physics ---------------------------------------------
+  const animateShot = (target: {x:number;y:number;z:number}) => {
     setGameState('shooting');
     setPlayerState('shooting');
     setShotTarget(target);
 
-    // Calculate trajectory points for realistic ball movement
     const startPos = { x: 0, y: 0, z: 11 }; // Penalty spot
     const trajectory = calculateTrajectory(startPos, target);
     setBallTrajectory(trajectory);
-
-    // Start ball animation immediately
     animateBallTrajectory(trajectory);
 
-    // Goalkeeper decision
-    const goalkeeperMoves = ['left', 'center', 'right'];
-    let gkMove = 'center';
-    
-    if (target.x < -2) gkMove = 'left';
-    else if (target.x > 2) gkMove = 'right';
-    
-    // Player follow-through after a short delay
-    setTimeout(() => {
-      setPlayerState('follow-through');
-    }, 200);
+    // GK decision by thirds using physical width
+    const halfWidth = GOAL_CONFIG.width / 2;
+    const thirds = halfWidth * 0.6;
+    let gkMove: 'left'|'center'|'right' = 'center';
+    if (target.x < -thirds) gkMove = 'left';
+    else if (target.x > thirds) gkMove = 'right';
 
-    // Goalkeeper reaction after slight delay
+    setTimeout(() => setPlayerState('follow-through'), 200);
+
     setTimeout(() => {
       let gkTargetX = 50;
       if (gkMove === 'left') gkTargetX = 35;
       else if (gkMove === 'right') gkTargetX = 65;
-      
-      setGoalkeeperState(`diving-${gkMove}`);
-      setGoalkeeperPosition({ 
-        x: gkTargetX, 
-        diving: true,
-        direction: gkMove
-      });
+
+      setGoalkeeperState(gkMove === 'left' ? 'diving-left'
+                         : gkMove === 'right' ? 'diving-right'
+                         : 'ready');
+      setGoalkeeperPosition({ x: gkTargetX, diving: true });
     }, 150);
 
     setTimeout(() => {
-      // Determine result
-      const isGoal = checkGoal(target, gkMove);
-      let resultText = isGoal ? 'GOAL!' : 'SAVED!';
-      
-      // Check if shot was off target
-      if (!isInGoal(target.x, target.y, target.z)) {
-        if (Math.abs(target.x) > 3.66) resultText = 'WIDE!';
-        else if (target.y > 2.44) resultText = 'OVER!';
-        else if (target.z > 1) resultText = 'SHORT!';
-        else resultText = 'MISS!';
+      const inGoalArea = isInGoal(target.x, target.y, target.z);
+      let resultText = '';
+      let isGoalScored = false;
+
+      if (!inGoalArea) {
+        if (Math.abs(target.x) > halfWidth)      resultText = 'WIDE!';
+        else if (target.y > GOAL_CONFIG.height)  resultText = 'OVER!';
+        else if (target.z > 200)                 resultText = 'SHORT!';
+        else                                     resultText = 'MISS!';
+        isGoalScored = false;
+      } else {
+        isGoalScored = checkGoal(target, gkMove);
+        resultText = isGoalScored ? 'GOAL!' : 'SAVED!';
       }
-      
+
       setResult(resultText);
-      
-      // Add shot to history
+
       setShotHistory(prev => [...prev, {
-        id: Date.now(),
-        target: target,
-        result: resultText,
-        isGoal: isGoal,
-        timestamp: new Date()
+        id: Date.now(), target, result: resultText, isGoal: isGoalScored, timestamp: new Date(),
       }]);
-      
-      // Update stats
-      if (isGoal) {
+
+      if (isGoalScored) {
         setStats(prev => ({
           goals: prev.goals + 1,
           streak: prev.streak + 1,
           shots: prev.shots + 1,
-          best: Math.max(prev.best, prev.streak + 1)
+          best: Math.max(prev.best, prev.streak + 1),
         }));
       } else {
-        setStats(prev => ({
-          ...prev,
-          streak: 0,
-          shots: prev.shots + 1
-        }));
+        setStats(prev => ({ ...prev, streak: 0, shots: prev.shots + 1 }));
       }
-      
-      setGameState('result');
+
+      setGameState('scoring');
       resetGame();
     }, 1200);
   };
 
-  const calculateTrajectory = (start, end) => {
-    // Calculate initial velocity components needed to reach target
+  const calculateTrajectory = (start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }) => {
     const deltaX = end.x - start.x;
-    const deltaZ = end.z - start.z; // Distance to goal
+    const deltaZ = end.z - start.z;
     const deltaY = end.y - start.y;
-    
-    // Time of flight (based on distance and desired speed)
+
     const distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
-    const timeOfFlight = Math.max(0.8, Math.min(1.2, distance / 15)); // 0.8-1.2 seconds based on distance
-    
-    // Initial velocity components
+    const timeOfFlight = Math.max(0.8, Math.min(1.2, distance / 15));
     const vx0 = deltaX / timeOfFlight;
     const vz0 = deltaZ / timeOfFlight;
-    
-    // Gravity constant (m/s²)
     const gravity = 9.81;
-    
-    // Initial Y velocity to reach target height considering gravity
     const vy0 = (deltaY / timeOfFlight) + (0.5 * gravity * timeOfFlight);
-    
-    return {
-      vx0, vy0, vz0,
-      timeOfFlight,
-      gravity,
-      startTime: null
-    };
+
+    return { vx0, vy0, vz0, timeOfFlight, gravity, startTime: null as number | null };
   };
 
-  const animateBallTrajectory = (trajectory) => {
-    const startPos = { x: 0, y: 0, z: 11 }; // Penalty spot
-    let animationId;
-    
-    const animate = (currentTime) => {
-      if (!trajectory.startTime) {
-        trajectory.startTime = currentTime;
-      }
-      
-      const elapsed = (currentTime - trajectory.startTime) / 1000; // Convert to seconds
+  const animateBallTrajectory = (trajectory: {
+    vx0: number; vy0: number; vz0: number; timeOfFlight: number; gravity: number; startTime: number | null;
+  }) => {
+    const startPos = { x: 0, y: 0, z: 11 };
+    let animationId: number | undefined;
+
+    const animate = (currentTime: number) => {
+      if (!trajectory.startTime) trajectory.startTime = currentTime;
+      const elapsed = (currentTime - trajectory.startTime) / 1000;
       const progress = elapsed / trajectory.timeOfFlight;
-      
+
       if (progress <= 1) {
-        // Physics-based position calculation
         const currentX = startPos.x + trajectory.vx0 * elapsed;
         const currentZ = startPos.z + trajectory.vz0 * elapsed;
-        const currentY = Math.max(0, 
-          startPos.y + 
-          trajectory.vy0 * elapsed - 
-          0.5 * trajectory.gravity * elapsed * elapsed
-        );
-        
+        const currentY = Math.max(0, startPos.y + trajectory.vy0 * elapsed - 0.5 * trajectory.gravity * elapsed * elapsed);
         const screenPos = fieldToScreen(currentX, currentZ, currentY);
         setBallPosition(screenPos);
-        
         animationId = requestAnimationFrame(animate);
       } else {
-        // Ball has reached target - ensure final position
         const finalX = startPos.x + trajectory.vx0 * trajectory.timeOfFlight;
         const finalZ = startPos.z + trajectory.vz0 * trajectory.timeOfFlight;
-        const finalY = Math.max(0,
-          startPos.y + 
-          trajectory.vy0 * trajectory.timeOfFlight - 
-          0.5 * trajectory.gravity * trajectory.timeOfFlight * trajectory.timeOfFlight
-        );
-        
+        const finalY = Math.max(0, startPos.y + trajectory.vy0 * trajectory.timeOfFlight - 0.5 * trajectory.gravity * trajectory.timeOfFlight * trajectory.timeOfFlight);
         const finalScreenPos = fieldToScreen(finalX, finalZ, finalY);
         setBallPosition(finalScreenPos);
       }
     };
-    
+
     animationId = requestAnimationFrame(animate);
-    
-    // Clean up function
-    return () => {
-      if (animationId) {
-        cancelAnimationFrame(animationId);
-      }
-    };
+    return () => { if (animationId) cancelAnimationFrame(animationId); };
   };
 
-  const checkGoal = (target, gkMove) => {
-    if (!isInGoal(target.x, target.y, target.z)) return false;
-    
-    // Calculate goalkeeper reach
-    const gkReach = 1.8; // Goalkeeper reach in meters
+  const checkGoal = (target: {x:number;y:number;z:number}, gkMove: 'left'|'center'|'right') => {
+    // Only called if already in-goal-area
+    const gkReach = 80; // pixels in field units
     let gkX = 0;
-    if (gkMove === 'left') gkX = -1.5;
-    else if (gkMove === 'right') gkX = 1.5;
-    
-    const distance = Math.sqrt(
-      Math.pow(target.x - gkX, 2) + 
-      Math.pow(target.y - 1, 2) // Goalkeeper hand height
-    );
-    
-    if (distance <= gkReach) {
-      return Math.random() < 0.3; // 30% chance to score even if keeper reaches
-    }
-    
+    if (gkMove === 'left') gkX = -75;
+    else if (gkMove === 'right') gkX = 75;
+
+    const distance = Math.sqrt(Math.pow(target.x - gkX, 2) + Math.pow(target.y - 100, 2)); // GK hand height ~100
+    if (distance <= gkReach) return Math.random() < 0.3;
     return true;
   };
 
@@ -344,6 +304,15 @@ export default function GamePage() {
 
   const shotPercentage = stats.shots > 0 ? Math.round((stats.goals / stats.shots) * 100) : 0;
 
+  // Mini chart mapping (goal-only)
+  const targetToChartPosition = (target: { x: number; y: number; z: number }) => {
+    const halfWidth = GOAL_CONFIG.width / 2;
+    const xPercent = ((target.x + halfWidth) / GOAL_CONFIG.width) * 100;
+    const yPercent = ((GOAL_CONFIG.height - target.y) / GOAL_CONFIG.height) * 100;
+    return { x: Math.max(0, Math.min(100, xPercent)), y: Math.max(0, Math.min(100, yPercent)) };
+  };
+
+  // --- Render ----------------------------------------------------------------
   return (
     <main className="min-h-screen bg-gradient-to-b from-sky-400 to-sky-200 relative overflow-hidden">
       {/* Red Stats Bar */}
@@ -351,13 +320,9 @@ export default function GamePage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-6 rounded overflow-hidden bg-white">
-              <img 
-                src={countryData?.flag} 
-                alt={`${selectedCountry} flag`}
-                className="w-full h-full object-contain"
-              />
+              <img src={countryData?.flag} alt={`${countryName} flag`} className="w-full h-full object-contain" />
             </div>
-            <span className="text-white font-bold text-lg">{selectedCountry}</span>
+            <span className="text-white font-bold text-lg">{countryName}</span>
           </div>
           <div className="flex items-center space-x-6 text-white font-medium">
             <span>GOALS {stats.goals}</span>
@@ -368,78 +333,63 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Game Scene Container */}
-      <div 
-        className="h-screen pt-20 cursor-crosshair relative"
-        onClick={handleGameClick}
-      >
-        {/* Green Field with perspective */}
-        <div className="absolute bottom-0 left-0 right-0 h-1/2 bg-gradient-to-t from-green-600 to-green-400 transform-gpu"
-             style={{
-               background: 'linear-gradient(to top, #16a34a 0%, #22c55e 50%, #4ade80 100%)'
-             }}>
-          
-          {/* Field markings */}
+      {/* Game Scene */}
+      <div ref={gameRef} className="h-screen pt-20 cursor-crosshair relative" onClick={handleGameClick}>
+        {/* Field */}
+        <div
+          className="absolute bottom-0 left-0 right-0 h-1/2 bg-gradient-to-t from-green-600 to-green-400 transform-gpu"
+          style={{ background: 'linear-gradient(to top, #16a34a 0%, #22c55e 50%, #4ade80 100%)' }}
+        >
           <div className="absolute bottom-0 left-1/2 w-px h-full bg-white opacity-50 transform -translate-x-1/2"></div>
-          
-          {/* Penalty area */}
           <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-64 h-32 border-2 border-white opacity-30"></div>
-          
-          {/* Penalty spot */}
           <div className="absolute bottom-20 left-1/2 w-2 h-2 bg-white rounded-full transform -translate-x-1/2"></div>
         </div>
 
-        {/* Goal Structure - positioned correctly in 3D space */}
-        <div className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none"
-             style={{ 
-               bottom: '50%', 
-               width: '400px', 
-               height: '160px'
-             }}>
-          {/* Goal posts and crossbar */}
+        {/* Goal (measured) */}
+        <div
+          ref={goalRef}
+          className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none"
+          style={{ bottom: '50%', width: `${GOAL_CONFIG.width}px`, height: `${GOAL_CONFIG.height}px` }}
+        >
+          {/* Posts + Crossbar */}
           <div className="absolute left-0 bottom-0 w-4 h-full bg-white"></div>
           <div className="absolute right-0 bottom-0 w-4 h-full bg-white"></div>
           <div className="absolute top-0 left-0 w-full h-4 bg-white"></div>
-          
-          {/* Goal net pattern */}
+
+          {/* Net */}
           <div className="absolute inset-4 opacity-30">
-            {Array.from({length: 8}).map((_, i) => (
-              <div key={`v${i}`} 
-                   className="absolute top-0 bottom-0 w-px bg-gray-300"
-                   style={{left: `${(i + 1) * 12.5}%`}}></div>
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={`v${i}`} className="absolute top-0 bottom-0 w-px bg-gray-300" style={{ left: `${(i + 1) * 12.5}%` }} />
             ))}
-            {Array.from({length: 6}).map((_, i) => (
-              <div key={`h${i}`} 
-                   className="absolute left-0 right-0 h-px bg-gray-300"
-                   style={{top: `${(i + 1) * 16.67}%`}}></div>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={`h${i}`} className="absolute left-0 right-0 h-px bg-gray-300" style={{ top: `${(i + 1) * 16.67}%` }} />
             ))}
           </div>
         </div>
 
-        {/* Ball with 3D physics */}
-        <div 
+        {/* Ball */}
+        <div
           className="absolute w-8 h-8 bg-white rounded-full shadow-lg transition-all duration-75 ease-linear z-20"
           style={{
             left: `${ballPosition.x}%`,
             top: `${ballPosition.y}%`,
             transform: 'translate(-50%, -50%)',
             boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-            background: 'radial-gradient(circle at 30% 30%, #ffffff, #f0f0f0)'
+            background: 'radial-gradient(circle at 30% 30%, #ffffff, #f0f0f0)',
           }}
         >
-          {/* Ball pattern */}
           <div className="absolute inset-0 rounded-full border border-gray-300 opacity-50"></div>
           <div className="absolute top-1 left-1 w-2 h-2 bg-white opacity-80 rounded-full"></div>
         </div>
 
         {/* Player */}
         <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 z-10">
-          <img 
+          <img
             src={getPlayerImage()}
             alt="Player"
             className="w-32 h-32 object-contain"
             onError={(e) => {
-              const target = e.target;
+              const target = e.currentTarget as HTMLImageElement;
               target.style.display = 'none';
               const parent = target.parentElement;
               if (parent) {
@@ -453,25 +403,27 @@ export default function GamePage() {
           />
         </div>
 
-        {/* Goalkeeper with 3D positioning */}
-        <div 
+        {/* Goalkeeper */}
+        <div
           className="absolute transition-all duration-700 ease-out z-15"
           style={{
             left: `${goalkeeperPosition.x}%`,
             bottom: '50%',
             transform: `translateX(-50%) translateY(40px) ${
-              goalkeeperState === 'diving-left' ? 'translateY(-20px) translateX(-30px) rotate(-15deg)' :
-              goalkeeperState === 'diving-right' ? 'translateY(-20px) translateX(30px) rotate(15deg)' :
-              goalkeeperState === 'diving-center' ? 'translateY(10px)' : ''
-            }`
+              goalkeeperState === 'diving-left'
+                ? 'translateY(-20px) translateX(-30px) rotate(-15deg)'
+                : goalkeeperState === 'diving-right'
+                ? 'translateY(-20px) translateX(30px) rotate(15deg)'
+                : ''
+            }`,
           }}
         >
-          <img 
+          <img
             src={getGoalkeeperImage()}
             alt="Goalkeeper"
             className="w-24 h-24 object-contain"
             onError={(e) => {
-              const target = e.target;
+              const target = e.currentTarget as HTMLImageElement;
               target.style.display = 'none';
               const parent = target.parentElement;
               if (parent) {
@@ -485,14 +437,15 @@ export default function GamePage() {
           />
         </div>
 
-        {/* Result Display */}
+        {/* Result */}
         {result && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
-            <div className={`text-6xl font-bold px-8 py-4 rounded-lg shadow-2xl ${
-              result === 'GOAL!' ? 'text-green-400 bg-black bg-opacity-70' : 
-              result.includes('SAVE') ? 'text-red-400 bg-black bg-opacity-70' :
-              'text-yellow-400 bg-black bg-opacity-70'
-            }`}>
+            <div
+              className={`text-6xl font-bold px-8 py-4 rounded-lg shadow-2xl ${
+                result === 'GOAL!' ? 'text-green-400 bg-black bg-opacity-70'
+              : result.includes('SAVE') ? 'text-red-400 bg-black bg-opacity-70'
+              : 'text-yellow-400 bg-black bg-opacity-70'}`}
+            >
               {result}
             </div>
           </div>
@@ -502,21 +455,21 @@ export default function GamePage() {
         {gameState === 'ready' && (
           <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-center z-20">
             <p className="text-lg font-semibold bg-black bg-opacity-70 text-white px-6 py-3 rounded-lg">
-              🎯 Click anywhere to aim your penalty kick!<br/>
+              🎯 Click anywhere to aim your penalty kick!<br />
               <span className="text-sm opacity-80">Higher = more height, corners = harder to save</span>
             </p>
           </div>
         )}
 
-        {/* Goal area highlighting */}
+        {/* Goal area highlight */}
         {gameState === 'ready' && (
-          <div className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none animate-pulse opacity-40"
-               style={{ 
-                 bottom: '50%', 
-                 width: '400px', 
-                 height: '160px',
-                 border: '3px dashed #10b981'
-               }}>
+          <div
+            className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none animate-pulse opacity-40"
+            style={{
+              bottom: '50%', width: `${GOAL_CONFIG.width}px`, height: `${GOAL_CONFIG.height}px`,
+              border: '3px dashed #10b981',
+            }}
+          >
             <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 text-green-400 font-bold text-lg">
               ⚽ AIM HERE ⚽
             </div>
@@ -525,21 +478,20 @@ export default function GamePage() {
 
         {/* Shot Target Indicator */}
         {shotTarget && gameState !== 'ready' && (
-          <div 
+          <div
             className="absolute w-4 h-4 border-2 border-yellow-400 rounded-full z-25"
             style={{
               left: `${fieldToScreen(shotTarget.x, shotTarget.z, shotTarget.y).x}%`,
               top: `${fieldToScreen(shotTarget.x, shotTarget.z, shotTarget.y).y}%`,
               transform: 'translate(-50%, -50%)',
-              backgroundColor: 'rgba(255, 255, 0, 0.3)'
+              backgroundColor: 'rgba(255, 255, 0, 0.3)',
             }}
-          ></div>
+          />
         )}
       </div>
 
-      {/* Shot Chart at Bottom */}
-      <div className="fixed bottom-0 left-0 right-0 bg-gray-900 bg-opacity-95 border-t-2 border-gray-700 p-2 z-40" 
-           style={{ transform: 'translateY(0px)' }}>
+      {/* Shot Chart */}
+      <div className="fixed bottom-0 left-0 right-0 bg-gray-900 bg-opacity-95 border-t-2 border-gray-700 p-2 z-40">
         <div className="max-w-[1152px] mx-auto">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-white font-bold text-sm">📊 SHOT CHART</h3>
@@ -547,48 +499,35 @@ export default function GamePage() {
               {shotHistory.length} shots • {shotHistory.filter(s => s.isGoal).length} goals
             </div>
           </div>
-          
+
           <div className="flex items-center space-x-3">
-            {/* Goal representation */}
-            <div className="relative bg-green-800 border-2 border-white rounded" 
-                 style={{ width: '240px', height: '96px' }}>
+            {/* Mini goal */}
+            <div className="relative bg-green-800 border-2 border-white rounded" style={{ width: '240px', height: '96px' }}>
               <div className="absolute inset-0 border border-gray-400 opacity-30"></div>
-              
-              {/* Goal posts */}
               <div className="absolute left-0 top-0 bottom-0 w-1 bg-white"></div>
               <div className="absolute right-0 top-0 bottom-0 w-1 bg-white"></div>
               <div className="absolute top-0 left-0 right-0 h-1 bg-white"></div>
-              
-              {/* Shot markers */}
-              {shotHistory.slice(-20).map((shot) => { // Show last 20 shots
-                const pos = targetToChartPosition(shot.target);
+
+              {shotHistory.slice(-20).map((shot) => {
                 const shotInGoal = isInGoal(shot.target.x, shot.target.y, shot.target.z);
-                
-                if (!shotInGoal) return null; // Only show shots that hit the goal area
-                
+                if (!shotInGoal) return null;
+                const pos = targetToChartPosition(shot.target);
                 return (
                   <div
                     key={shot.id}
                     className={`absolute w-2 h-2 rounded-full border transform -translate-x-1/2 -translate-y-1/2 ${
-                      shot.isGoal 
-                        ? 'bg-green-400 border-green-600' 
-                        : 'bg-red-400 border-red-600'
+                      shot.isGoal ? 'bg-green-400 border-green-600' : 'bg-red-400 border-red-600'
                     }`}
-                    style={{
-                      left: `${pos.x}%`,
-                      top: `${pos.y}%`
-                    }}
+                    style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
                     title={`${shot.result}`}
                   />
                 );
               })}
-              
-              <div className="absolute -bottom-5 left-1/2 transform -translate-x-1/2 text-white text-xs">
-                GOAL
-              </div>
+
+              <div className="absolute -bottom-5 left-1/2 transform -translate-x-1/2 text-white text-xs">GOAL</div>
             </div>
-            
-            {/* Legend and recent shots list */}
+
+            {/* Legend + recent */}
             <div className="flex-1 flex items-center justify-between">
               <div className="flex items-center space-x-3">
                 <div className="flex items-center space-x-1">
@@ -600,17 +539,16 @@ export default function GamePage() {
                   <span className="text-red-400 text-xs font-medium">SAVE</span>
                 </div>
               </div>
-              
-              {/* Recent shots */}
+
               <div className="flex items-center space-x-1">
                 <span className="text-gray-400 text-xs mr-1">RECENT:</span>
                 {shotHistory.slice(-8).reverse().map((shot) => (
                   <div
                     key={shot.id}
                     className={`w-1.5 h-4 rounded-sm ${
-                      shot.isGoal ? 'bg-green-400' : 
-                      shot.result.includes('SAVE') ? 'bg-red-400' : 
-                      'bg-yellow-400'
+                      shot.isGoal ? 'bg-green-400'
+                      : shot.result.includes('SAVE') ? 'bg-red-400'
+                      : 'bg-yellow-400'
                     }`}
                     title={shot.result}
                   />

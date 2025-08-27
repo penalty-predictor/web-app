@@ -424,7 +424,8 @@ export default function GamePage() {
       'Jordan': { bg: 'bg-white', text: 'text-black' },
       'Ecuador': { bg: 'bg-yellow-400', text: 'text-black' },
       'New Zealand': { bg: 'bg-black', text: 'text-white' },
-      'Canada': { bg: 'bg-red-600', text: 'text-white' }
+      'Canada': { bg: 'bg-red-600', text: 'text-white' },
+      'Iran': { bg: 'bg-green-600', text: 'text-white' }
     };
     
     return colorMap[countryName] || { bg: 'bg-sky-400', text: 'text-white' };
@@ -447,7 +448,7 @@ export default function GamePage() {
          onClick={handleCountryChange}
          className="absolute top-2 left-2 z-20 bg-red-600 hover:bg-red-700 text-white font-bold px-4 py-2 rounded-lg shadow-lg transition-colors"
        >
-         🏠 MAIN MENU
+         MAIN MENU
        </button>
        
                                {/* Country-colored stats bar */}

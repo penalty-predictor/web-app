@@ -19,7 +19,7 @@ export default function GamePage() {
   const selectedCountry = searchParams.get('country');
   useEffect(() => { if (!selectedCountry) window.location.href = '/'; }, [selectedCountry]);
 
-  const countryName = selectedCountry || 'United States';
+  const [countryName, setCountryName] = useState(selectedCountry || 'United States');
   const countryData = countries.find(c => c.name === countryName);
 
   // Visual/physical goal units
@@ -92,6 +92,8 @@ export default function GamePage() {
   const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, y: 50, diving: false });
   const gkDiveFieldRef = useRef<{ x:number; y:number } | null>(null);   // keeper target (FIELD)
   const gkDiveScreenRef = useRef<{ x:number; y:number } | null>(null);  // keeper target (SCREEN%)
+  
+
 
   const [result, setResult] = useState('');
   const [stats, setStats] = useState({ goals: 0, streak: 0, shots: 0, best: 0 });
@@ -389,6 +391,45 @@ export default function GamePage() {
 
   const shotPercentage = stats.shots > 0 ? Math.round((stats.goals / stats.shots) * 100) : 0;
 
+  // Handle country change - redirect to grid
+  const handleCountryChange = () => {
+    window.location.href = '/';
+  };
+
+  // Get country-specific background color with proper contrast
+  const getCountryBackgroundColor = (countryName: string) => {
+    const colorMap: { [key: string]: { bg: string; text: string } } = {
+      'Argentina': { bg: 'bg-blue-400', text: 'text-white' },
+      'Brazil': { bg: 'bg-yellow-400', text: 'text-black' },
+      'France': { bg: 'bg-blue-600', text: 'text-white' },
+      'Germany': { bg: 'bg-black', text: 'text-white' },
+      'Italy': { bg: 'bg-blue-500', text: 'text-white' },
+      'Netherlands': { bg: 'bg-orange-500', text: 'text-white' },
+      'Portugal': { bg: 'bg-red-600', text: 'text-white' },
+      'Spain': { bg: 'bg-red-500', text: 'text-white' },
+      'England': { bg: 'bg-white', text: 'text-black' },
+      'Belgium': { bg: 'bg-red-600', text: 'text-white' },
+      'Croatia': { bg: 'bg-red-600', text: 'text-white' },
+      'Denmark': { bg: 'bg-red-600', text: 'text-white' },
+      'Japan': { bg: 'bg-blue-600', text: 'text-white' },
+      'Mexico': { bg: 'bg-green-600', text: 'text-white' },
+      'Morocco': { bg: 'bg-red-600', text: 'text-white' },
+      'Poland': { bg: 'bg-white', text: 'text-black' },
+      'Senegal': { bg: 'bg-green-600', text: 'text-white' },
+      'South Korea': { bg: 'bg-red-600', text: 'text-white' },
+      'Switzerland': { bg: 'bg-red-600', text: 'text-white' },
+      'United States': { bg: 'bg-blue-600', text: 'text-white' },
+      'Uruguay': { bg: 'bg-blue-600', text: 'text-white' },
+      'Wales': { bg: 'bg-red-600', text: 'text-white' },
+      'Jordan': { bg: 'bg-white', text: 'text-black' },
+      'Ecuador': { bg: 'bg-yellow-400', text: 'text-black' },
+      'New Zealand': { bg: 'bg-black', text: 'text-white' },
+      'Canada': { bg: 'bg-red-600', text: 'text-white' }
+    };
+    
+    return colorMap[countryName] || { bg: 'bg-sky-400', text: 'text-white' };
+  };
+
   const targetToChartPosition = (target: { x: number; y: number; z: number }) => {
     const halfWidth = GOAL_CONFIG.width / 2;
     const xPercent = ((target.x + halfWidth) / GOAL_CONFIG.width) * 100;
@@ -397,25 +438,35 @@ export default function GamePage() {
   };
 
   // --- Render ---
-  return (
-    <main className="min-h-screen bg-gradient-to-b from-sky-400 to-sky-200 relative overflow-hidden">
-      {/* Red stats bar */}
-      <div className="absolute top-4 left-4 right-4 bg-red-600 p-4 shadow-lg rounded-lg max-w-[1152px] mx-auto z-10">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-6 rounded overflow-hidden bg-white">
-              <img src={countryData?.flag} alt={`${countryName} flag`} className="w-full h-full object-contain" />
+     const countryColors = getCountryBackgroundColor(countryName);
+   
+         return (
+     <main className="min-h-screen bg-gradient-to-b from-blue-900 to-blue-700 relative overflow-hidden">
+       {/* Main Menu Button */}
+       <button
+         onClick={handleCountryChange}
+         className="absolute top-2 left-2 z-20 bg-red-600 hover:bg-red-700 text-white font-bold px-4 py-2 rounded-lg shadow-lg transition-colors"
+       >
+         🏠 MAIN MENU
+       </button>
+       
+                               {/* Country-colored stats bar */}
+          <div className={`absolute top-4 left-4 right-4 ${countryColors.bg} p-4 shadow-lg rounded-lg max-w-[1152px] mx-auto z-10`}>
+          <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-3">
+               <div className="w-8 h-6 rounded overflow-hidden bg-white">
+                 <img src={countryData?.flag} alt={`${countryName} flag`} className="w-full h-full object-contain" />
+               </div>
+               <span className={`${countryColors.text} font-bold text-lg`}>{countryName}</span>
+             </div>
+            <div className={`flex items-center space-x-6 ${countryColors.text} font-medium`}>
+              <span>GOALS {stats.goals}</span>
+              <span>STREAK {stats.streak}</span>
+              <span>SHOT % {shotPercentage}</span>
+              <span className={`px-3 py-1 rounded ${countryColors.text === 'text-white' ? 'bg-red-800' : 'bg-gray-800 text-white'}`}>BEST {stats.best}</span>
             </div>
-            <span className="text-white font-bold text-lg">{countryName}</span>
-          </div>
-          <div className="flex items-center space-x-6 text-white font-medium">
-            <span>GOALS {stats.goals}</span>
-            <span>STREAK {stats.streak}</span>
-            <span>SHOT % {shotPercentage}</span>
-            <span className="bg-red-800 px-3 py-1 rounded">BEST {stats.best}</span>
           </div>
         </div>
-      </div>
 
       {/* Game scene */}
       <div ref={gameRef} className="h-screen pt-20 cursor-crosshair relative" onClick={handleGameClick}>

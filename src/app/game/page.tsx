@@ -19,30 +19,39 @@ export default function GamePage() {
   const selectedCountry = searchParams.get('country');
   useEffect(() => { if (!selectedCountry) window.location.href = '/'; }, [selectedCountry]);
 
-  const [countryName, setCountryName] = useState(selectedCountry || 'United States');
+  const countryName = selectedCountry || 'United States';
   const countryData = countries.find(c => c.name === countryName);
 
-  // Visual/physical goal units
+  // Physical goal units (used for keeper/ball geometry)
   const GOAL_CONFIG = { width: 500, height: 200, depth: 30 };
 
-  // Keeper tuning (contact is deterministic; no magnetizing)
+  // Keeper base tuning
   const GK = {
-    reactionMs: 180,
-    decideMs: 1200,
-    // Elliptical reach half-axes (FIELD units) — tuned so low corners are harder
-    reachHx: 60,         // horizontal half-axis
-    reachHy: 42,         // vertical half-axis (before low-shot scaling)
-    lowShotScaleMin: 0.55, // vertical reach scale at ground (0..1)
-    bodyRadius: 18,      // where we place contact relative to keeper center
+    baseReactionMs: 180,     // when the keeper starts the dive (mean)
+    decideMs: 1200,          // when we finalize the result & show contact
+    reachHx: 60,             // base ellipse half-axis (horizontal) in FIELD units
+    reachHy: 42,             // base ellipse half-axis (vertical)   in FIELD units
+    lowShotScaleMin: 0.55,   // vertical reach reduced near ground
+    bodyRadius: 18,          // how far from keeper center to place the ball on contact
   };
 
+  // Keeper randomness ONLY — ball target never changes
+  const RNG = {
+    keeperCorrectGuessP: 0.55, // chance the keeper dives to the correct third
+    diveOffsetMax: 12,         // max random offset (FIELD) around chosen dive point
+    reachJitterMin: 0.9,       // random scale per shot on reach ellipse
+    reachJitterMax: 1.08,
+    reactionJitterMs: 120,     // ±ms around baseReactionMs
+  };
+
+  // DOM
   const gameRef = useRef<HTMLDivElement>(null);
   const goalRef = useRef<HTMLDivElement>(null);
 
-  // Layout (in % of game container) => scroll-proof math
+  // Layout (% of game container) so scroll doesn’t affect mapping
   const [layout, setLayout] = useState<LayoutPct | null>(null);
 
-  // Must match visual post/crossbar thickness (w-4/h-4 => 16px)
+  // Match the visual post/crossbar thickness (w-4/h-4 => 16px)
   const POST_THICKNESS_PX = 16;
   const CROSSBAR_THICKNESS_PX = 16;
 
@@ -90,10 +99,12 @@ export default function GamePage() {
 
   const [goalkeeperState, setGoalkeeperState] = useState<'ready' | 'diving-left' | 'diving-right'>('ready');
   const [goalkeeperPosition, setGoalkeeperPosition] = useState({ x: 50, y: 50, diving: false });
-  const gkDiveFieldRef = useRef<{ x:number; y:number } | null>(null);   // keeper target (FIELD)
-  const gkDiveScreenRef = useRef<{ x:number; y:number } | null>(null);  // keeper target (SCREEN%)
-  
 
+  // Keeper shot-local params (random each shot; do NOT affect ball target)
+  const gkDiveFieldRef   = useRef<{ x:number; y:number } | null>(null);
+  const gkDiveScreenRef  = useRef<{ x:number; y:number } | null>(null);
+  const gkHxHyRef        = useRef<{ hx:number; hy:number } | null>(null); // jittered reach ellipse
+  const gkReactionMsRef  = useRef<number>(GK.baseReactionMs);
 
   const [result, setResult] = useState('');
   const [stats, setStats] = useState({ goals: 0, streak: 0, shots: 0, best: 0 });
@@ -106,6 +117,7 @@ export default function GamePage() {
   }>>([]);
   const [shotTarget, setShotTarget] = useState<{ x: number; y: number; z: number } | null>(null);
 
+  // Idle keeper placement once layout lands
   useEffect(() => {
     if (!layout) return;
     const idle = fieldToScreen(0, 0, 0);
@@ -126,8 +138,12 @@ export default function GamePage() {
       }
       setResult('');
       setShotTarget(null);
-      gkDiveFieldRef.current = null;
+
+      // clear per-shot keeper params
+      gkDiveFieldRef.current  = null;
       gkDiveScreenRef.current = null;
+      gkHxHyRef.current       = null;
+      gkReactionMsRef.current = GK.baseReactionMs;
     }, 2500);
   }, [layout]);
 
@@ -140,7 +156,7 @@ export default function GamePage() {
     let xPct: number, yPct: number;
 
     if (fieldZ <= GOAL_CONFIG.depth) {
-      // Allow outside to show truly wide/over
+      // Allow outside to show true wide/over
       const xNorm = (fieldX + halfW) / GOAL_CONFIG.width;
       const yNorm = fieldY / GOAL_CONFIG.height;
       xPct = L.innerLeftPct + xNorm * L.innerWidthPct;
@@ -175,21 +191,21 @@ export default function GamePage() {
     }
 
     if (withinY && !withinX) {
-      // Lateral outside (true wide)
+      // True wide (goal plane)
       const xNorm = (clickXPct - L.innerLeftPct) / L.innerWidthPct;
       const yNorm = (L.innerBottomPct - clickYPct) / L.innerHeightPct;
       return { x: xNorm * GOAL_CONFIG.width - halfW, y: yNorm * GOAL_CONFIG.height, z: 0 };
     }
 
     if (clickYPct > L.innerBottomPct) {
-      // On the field (below goal)
+      // On the field in front
       const depth = (clickYPct - L.innerBottomPct) / (100 - L.innerBottomPct) * 100;
       const xNormAroundCenter =
         (clickXPct - (L.innerLeftPct + L.innerWidthPct / 2)) / (L.innerWidthPct / 2);
       return { x: xNormAroundCenter * halfW, y: 0, z: Math.max(0, Math.min(depth, 100)) };
     }
 
-    // Above crossbar
+    // Above the crossbar (goal plane)
     const xNorm = (clickXPct - L.innerLeftPct) / L.innerWidthPct;
     const overYN = (L.innerTopPct - clickYPct) / L.innerHeightPct;
     return {
@@ -207,31 +223,36 @@ export default function GamePage() {
   // --- Input ---
   const handleGameClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (gameState !== 'ready' || !layout) return;
-    const target = screenToField(e.clientX, e.clientY);
+    const target = screenToField(e.clientX, e.clientY); // exact, no dispersion
     animateShot(target);
   };
 
-  // Third centers for keeper dive
+  // Keeper third centers
   const thirdCentersFieldX = () => {
     const half = GOAL_CONFIG.width / 2;
     return [-half * 0.66, 0, half * 0.66];
   };
 
-  // Elliptical save test — vertical reach shrinks for low shots
+  // Keeper save decision — ellipse with per-shot jitter + height scaling
   const keeperSaves = (target:{x:number;y:number}, dive:{x:number;y:number}) => {
     const dx = target.x - dive.x;
     const dy = target.y - dive.y;
 
-    // scale vertical reach: at ground -> lowShotScaleMin, at crossbar -> 1
-    const yFrac = Math.max(0, Math.min(1, target.y / GOAL_CONFIG.height));
-    const hy = GK.reachHy * (GK.lowShotScaleMin + (1 - GK.lowShotScaleMin) * yFrac);
-    const hx = GK.reachHx;
+    // Base, then jitter
+    const jitter = lerp(RNG.reachJitterMin, RNG.reachJitterMax, Math.random());
+    const baseHx = GK.reachHx * jitter;
+    const baseHy = GK.reachHy * jitter;
+
+    // Height scaling for vertical half-axis: ground -> smaller reach
+    const yFrac = clamp01(target.y / GOAL_CONFIG.height);
+    const hy = baseHy * (GK.lowShotScaleMin + (1 - GK.lowShotScaleMin) * yFrac);
+    const hx = baseHx;
 
     const val = (dx*dx)/(hx*hx) + (dy*dy)/(hy*hy);
-    return val <= 1; // inside ellipse
+    return val <= 1;
   };
 
-  // Randomize a small body-contact angle so it’s not always gloves
+  // Small body contact randomization (ball doesn’t always hit the same spot)
   const contactPoint = (dive:{x:number;y:number}, target:{x:number;y:number}) => {
     const dx = target.x - dive.x;
     const dy = target.y - dive.y;
@@ -251,37 +272,58 @@ export default function GamePage() {
     setPlayerState('shooting');
     setShotTarget(target);
 
-    // Ball trajectory
+    // Ball trajectory (purely kinematic; same click => same target)
     const startPos = { x: 0, y: 0, z: 11 };
     const traj = calculateTrajectory(startPos, target);
     animateBallTrajectory(traj);
 
-    // Keeper guesses a third, dives once (fixed)
+    // Keeper: choose third with probability, add dive jitter, random reaction
     const halfW = GOAL_CONFIG.width / 2;
-    const thirds = halfW * 0.6;
-    let gkMove: 'left'|'center'|'right' = 'center';
-    if (target.x < -thirds) gkMove = 'left';
-    else if (target.x > thirds) gkMove = 'right';
+    const thirdsThreshold = halfW * 0.6;
+    const trueThird: 'left' | 'center' | 'right' =
+      target.x < -thirdsThreshold ? 'left' :
+      target.x >  thirdsThreshold ? 'right' : 'center';
 
+    const correct = Math.random() < RNG.keeperCorrectGuessP;
+    let plannedThird: 'left' | 'center' | 'right' = trueThird;
+    if (!correct) {
+      // choose one of the other two
+      const options = (['left','center','right'] as const).filter(t => t !== trueThird);
+      plannedThird = options[Math.floor(Math.random() * options.length)];
+    }
+
+    // When the player kicks
     setTimeout(() => setPlayerState('follow-through'), 200);
+
+    // Keeper dives after (randomized) reaction time
+    const reactionMs = GK.baseReactionMs + (Math.random() * 2 - 1) * RNG.reactionJitterMs;
+    gkReactionMsRef.current = reactionMs;
 
     setTimeout(() => {
       const [leftC, centerC, rightC] = thirdCentersFieldX();
-      const diveX = gkMove === 'left' ? leftC : gkMove === 'right' ? rightC : centerC;
-      const diveY = GOAL_CONFIG.height * 0.45; // mid-height
+      const targetX = plannedThird === 'left' ? leftC : plannedThird === 'right' ? rightC : centerC;
+      const targetY = GOAL_CONFIG.height * 0.45;
+
+      // Dive jitter (doesn't change ball target, only keeper reach center)
+      const jitterX = (Math.random() * 2 - 1) * RNG.diveOffsetMax;
+      const jitterY = (Math.random() * 2 - 1) * RNG.diveOffsetMax * 0.6;
+
+      const diveX = targetX + jitterX;
+      const diveY = targetY + jitterY;
+
       const diveScreen = fieldToScreen(diveX, 0, diveY);
 
-      gkDiveFieldRef.current = { x: diveX, y: diveY };
+      gkDiveFieldRef.current  = { x: diveX, y: diveY };
       gkDiveScreenRef.current = { x: diveScreen.x, y: diveScreen.y };
 
       setGoalkeeperState(
-        gkMove === 'left' ? 'diving-left' :
-        gkMove === 'right' ? 'diving-right' : 'ready'
+        plannedThird === 'left' ? 'diving-left' :
+        plannedThird === 'right' ? 'diving-right' : 'ready'
       );
       setGoalkeeperPosition({ x: diveScreen.x, y: diveScreen.y, diving: true });
-    }, GK.reactionMs);
+    }, Math.max(0, reactionMs));
 
-    // Decide result
+    // Decide the outcome
     setTimeout(() => {
       const inGoalArea = isInGoal(target.x, target.y, target.z);
       let text = '';
@@ -299,7 +341,7 @@ export default function GamePage() {
           text = 'SAVED!';
           isGoal = false;
 
-          // Show contact point on the keeper body (slight randomness)
+          // Visual contact point (ball meets keeper body); keeper stays put
           const contact = contactPoint(dive, {x:target.x,y:target.y});
           const contactScreen = fieldToScreen(contact.x, 0, contact.y);
           setBallPosition({ x: contactScreen.x, y: contactScreen.y });
@@ -328,6 +370,7 @@ export default function GamePage() {
     }, GK.decideMs);
   };
 
+  // Physics for ball
   const calculateTrajectory = (start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }) => {
     const dx = end.x - start.x;
     const dz = end.z - start.z;
@@ -391,46 +434,6 @@ export default function GamePage() {
 
   const shotPercentage = stats.shots > 0 ? Math.round((stats.goals / stats.shots) * 100) : 0;
 
-  // Handle country change - redirect to grid
-  const handleCountryChange = () => {
-    window.location.href = '/';
-  };
-
-  // Get country-specific background color with proper contrast
-  const getCountryBackgroundColor = (countryName: string) => {
-    const colorMap: { [key: string]: { bg: string; text: string } } = {
-      'Argentina': { bg: 'bg-blue-400', text: 'text-white' },
-      'Brazil': { bg: 'bg-yellow-400', text: 'text-black' },
-      'France': { bg: 'bg-blue-600', text: 'text-white' },
-      'Germany': { bg: 'bg-black', text: 'text-white' },
-      'Italy': { bg: 'bg-blue-500', text: 'text-white' },
-      'Netherlands': { bg: 'bg-orange-500', text: 'text-white' },
-      'Portugal': { bg: 'bg-red-600', text: 'text-white' },
-      'Spain': { bg: 'bg-red-500', text: 'text-white' },
-      'England': { bg: 'bg-white', text: 'text-black' },
-      'Belgium': { bg: 'bg-red-600', text: 'text-white' },
-      'Croatia': { bg: 'bg-red-600', text: 'text-white' },
-      'Denmark': { bg: 'bg-red-600', text: 'text-white' },
-      'Japan': { bg: 'bg-blue-600', text: 'text-white' },
-      'Mexico': { bg: 'bg-green-600', text: 'text-white' },
-      'Morocco': { bg: 'bg-red-600', text: 'text-white' },
-      'Poland': { bg: 'bg-white', text: 'text-black' },
-      'Senegal': { bg: 'bg-green-600', text: 'text-white' },
-      'South Korea': { bg: 'bg-red-600', text: 'text-white' },
-      'Switzerland': { bg: 'bg-red-600', text: 'text-white' },
-      'United States': { bg: 'bg-blue-600', text: 'text-white' },
-      'Uruguay': { bg: 'bg-blue-600', text: 'text-white' },
-      'Wales': { bg: 'bg-red-600', text: 'text-white' },
-      'Jordan': { bg: 'bg-white', text: 'text-black' },
-      'Ecuador': { bg: 'bg-yellow-400', text: 'text-black' },
-      'New Zealand': { bg: 'bg-black', text: 'text-white' },
-      'Canada': { bg: 'bg-red-600', text: 'text-white' },
-      'Iran': { bg: 'bg-green-600', text: 'text-white' }
-    };
-    
-    return colorMap[countryName] || { bg: 'bg-sky-400', text: 'text-white' };
-  };
-
   const targetToChartPosition = (target: { x: number; y: number; z: number }) => {
     const halfWidth = GOAL_CONFIG.width / 2;
     const xPercent = ((target.x + halfWidth) / GOAL_CONFIG.width) * 100;
@@ -438,48 +441,38 @@ export default function GamePage() {
     return { x: Math.max(0, Math.min(100, xPercent)), y: Math.max(0, Math.min(100, yPercent)) };
   };
 
-  // --- Render ---
-     const countryColors = getCountryBackgroundColor(countryName);
-   
-         return (
-     <main className="min-h-screen bg-gradient-to-b from-blue-900 to-blue-700 relative overflow-hidden">
-       {/* Main Menu Button */}
-       <button
-         onClick={handleCountryChange}
-         className="absolute top-2 left-2 z-20 bg-red-600 hover:bg-red-700 text-white font-bold px-4 py-2 rounded-lg shadow-lg transition-colors"
-       >
-         MAIN MENU
-       </button>
-       
-                               {/* Country-colored stats bar */}
-          <div className={`absolute top-4 left-4 right-4 ${countryColors.bg} p-4 shadow-lg rounded-lg max-w-[1152px] mx-auto z-10`}>
-          <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-3">
-               <div className="w-8 h-6 rounded overflow-hidden bg-white">
-                 <img src={countryData?.flag} alt={`${countryName} flag`} className="w-full h-full object-contain" />
-               </div>
-               <span className={`${countryColors.text} font-bold text-lg`}>{countryName}</span>
-             </div>
-            <div className={`flex items-center space-x-6 ${countryColors.text} font-medium`}>
-              <span>GOALS {stats.goals}</span>
-              <span>STREAK {stats.streak}</span>
-              <span>SHOT % {shotPercentage}</span>
-              <span className={`px-3 py-1 rounded ${countryColors.text === 'text-white' ? 'bg-red-800' : 'bg-gray-800 text-white'}`}>BEST {stats.best}</span>
+  // --- UI ---
+  return (
+    <main className="min-h-screen bg-gradient-to-b from-indigo-900 to-indigo-900 relative overflow-hidden">
+      {/* Stats bar */}
+      <div className="absolute top-4 left-4 right-4 bg-blue-600 p-4 shadow-lg rounded-lg max-w-[1152px] mx-auto z-10">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-6 rounded overflow-hidden bg-white">
+              <img src={countryData?.flag} alt={`${countryName} flag`} className="w-full h-full object-contain" />
             </div>
+            <span className="text-white font-bold text-lg">{countryName}</span>
+          </div>
+          <div className="flex items-center space-x-6 text-white font-medium">
+            <span>GOALS {stats.goals}</span>
+            <span>STREAK {stats.streak}</span>
+            <span>SHOT % {shotPercentage}</span>
+            <span className="bg-red-700 px-3 py-1 rounded">BEST {stats.best}</span>
           </div>
         </div>
+      </div>
 
       {/* Game scene */}
       <div ref={gameRef} className="h-screen pt-20 cursor-crosshair relative" onClick={handleGameClick}>
         {/* Field */}
         <div className="absolute bottom-0 left-0 right-0 h-1/2"
              style={{ background: 'linear-gradient(to top, #16a34a 0%, #22c55e 50%, #4ade80 100%)' }}>
-          <div className="absolute bottom-0 left-1/2 w-px h-full bg-white opacity-50 transform -translate-x-1/2"></div>
-          <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-64 h-32 border-2 border-white opacity-30"></div>
+          <div className="absolute bottom-0 left-1/2 w-px h-full bg-white opacity-30 transform -translate-x-1/2"></div>
+          <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-64 h-32 border-2 border-white opacity-20"></div>
           <div className="absolute bottom-20 left-1/2 w-2 h-2 bg-white rounded-full transform -translate-x-1/2"></div>
         </div>
 
-        {/* Goal */}
+        {/* Goal (measured) */}
         <div
           ref={goalRef}
           className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none"
@@ -489,12 +482,12 @@ export default function GamePage() {
           <div className="absolute right-0 bottom-0 w-4 h-full bg-white"></div>
           <div className="absolute top-0 left-0 w-full h-4 bg-white"></div>
 
-          <div className="absolute inset-4 opacity-30">
+          <div className="absolute inset-4 opacity-25">
             {Array.from({ length: 8 }).map((_, i) => (
-              <div key={`v${i}`} className="absolute top-0 bottom-0 w-px bg-gray-300" style={{ left: `${(i + 1) * 12.5}%` }} />
+              <div key={`v${i}`} className="absolute top-0 bottom-0 w-px bg-blue-200" style={{ left: `${(i + 1) * 12.5}%` }} />
             ))}
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={`h${i}`} className="absolute left-0 right-0 h-px bg-gray-300" style={{ top: `${(i + 1) * 16.67}%` }} />
+              <div key={`h${i}`} className="absolute left-0 right-0 h-px bg-blue-200" style={{ top: `${(i + 1) * 16.67}%` }} />
             ))}
           </div>
         </div>
@@ -506,18 +499,18 @@ export default function GamePage() {
             left: `${ballPosition.x}%`,
             top: `${ballPosition.y}%`,
             transform: 'translate(-50%, -50%)',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-            background: 'radial-gradient(circle at 30% 30%, #ffffff, #f0f0f0)'
+            boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+            background: 'radial-gradient(circle at 30% 30%, #ffffff, #e9e9e9)'
           }}
         >
-          <div className="absolute inset-0 rounded-full border border-gray-300 opacity-50"></div>
-          <div className="absolute top-1 left-1 w-2 h-2 bg-white opacity-80 rounded-full"></div>
+          <div className="absolute inset-0 rounded-full border border-white/40"></div>
+          <div className="absolute top-1 left-1 w-2 h-2 bg-white/90 rounded-full"></div>
         </div>
 
-        {/* Player (+50%) */}
+        {/* Player (50% larger) */}
         <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 z-10">
           <img
-            src="/player-ready.png"
+            src={getPlayerImage()}
             alt="Player"
             className="w-48 h-48 object-contain"
             onError={(e) => {
@@ -535,7 +528,7 @@ export default function GamePage() {
           />
         </div>
 
-        {/* Goalkeeper (+50%) */}
+        {/* Goalkeeper (50% larger) */}
         <div
           className="absolute transition-all duration-700 ease-out z-15"
           style={{
@@ -551,11 +544,7 @@ export default function GamePage() {
           }}
         >
           <img
-            src={
-              goalkeeperState === 'diving-left' ? '/goalkeeper-diving-left.png' :
-              goalkeeperState === 'diving-right' ? '/goalkeeper-diving-right.png' :
-              '/goalkeeper-ready.png'
-            }
+            src={getGoalkeeperImage()}
             alt="Goalkeeper"
             className="w-36 h-36 object-contain"
             onError={(e) => {
@@ -577,9 +566,9 @@ export default function GamePage() {
         {result && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
             <div className={`text-6xl font-bold px-8 py-4 rounded-lg shadow-2xl ${
-              result === 'GOAL!' ? 'text-green-400 bg-black bg-opacity-70'
-              : result.includes('SAVE') ? 'text-red-400 bg-black bg-opacity-70'
-              : 'text-yellow-400 bg-black bg-opacity-70'}`}>
+              result === 'GOAL!' ? 'text-green-400 bg-black/70'
+              : result.includes('SAVE') ? 'text-red-400 bg-black/70'
+              : 'text-yellow-400 bg-black/70'}`}>
               {result}
             </div>
           </div>
@@ -588,9 +577,9 @@ export default function GamePage() {
         {/* Instructions */}
         {gameState === 'ready' && (
           <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-center z-20">
-            <p className="text-lg font-semibold bg-black bg-opacity-70 text-white px-6 py-3 rounded-lg">
+            <p className="text-lg font-semibold bg-black/70 text-white px-6 py-3 rounded-lg">
               🎯 Click anywhere to aim your penalty kick!<br/>
-              <span className="text-sm opacity-80">Higher = more height, corners = harder to save</span>
+              <span className="text-sm opacity-80">Same click, different outcomes — depends on the keeper.</span>
             </p>
           </div>
         )}
@@ -598,7 +587,7 @@ export default function GamePage() {
         {/* Visual goal highlight */}
         {gameState === 'ready' && (
           <div
-            className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none animate-pulse opacity-40"
+            className="absolute left-1/2 transform -translate-x-1/2 pointer-events-none animate-pulse opacity-30"
             style={{
               bottom: '50%', width: `${GOAL_CONFIG.width}px`, height: `${GOAL_CONFIG.height}px`,
               border: '3px dashed #10b981'
@@ -620,7 +609,7 @@ export default function GamePage() {
         )}
       </div>
 
-      {/* Shot chart (scroll down) */}
+      {/* Shot chart (below fold) */}
       <div className="relative bg-gray-900 bg-opacity-95 border-t-2 border-gray-700 p-4 z-40 mt-16">
         <div className="max-w-[1152px] mx-auto">
           <div className="flex items-center justify-between mb-2">
@@ -638,7 +627,10 @@ export default function GamePage() {
               <div className="absolute top-0 left-0 right-0 h-1 bg-white"></div>
 
               {shotHistory.slice(-20).map((shot) => {
-                const inGoal = isInGoal(shot.target.x, shot.target.y, shot.target.z);
+                const halfWidth = GOAL_CONFIG.width / 2;
+                const inGoal = Math.abs(shot.target.x) <= halfWidth &&
+                               shot.target.y >= 0 && shot.target.y <= GOAL_CONFIG.height &&
+                               shot.target.z <= GOAL_CONFIG.depth;
                 if (!inGoal) return null;
                 const pos = targetToChartPosition(shot.target);
                 return (
@@ -689,3 +681,8 @@ export default function GamePage() {
     </main>
   );
 }
+
+/* ---------- helpers ---------- */
+
+function clamp01(x:number){ return Math.max(0, Math.min(1, x)); }
+function lerp(a:number,b:number,t:number){ return a + (b-a)*t; }

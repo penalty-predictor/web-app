@@ -3,62 +3,62 @@ import { Country } from './types';
 export const countries: Country[] = [
   {
     name: 'Canada',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/ca.svg',
+    flag: '/flags/canada.svg',
     code: 'CAN'
   },
   {
     name: 'United States',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/us.svg',
+    flag: '/flags/usa.svg',
     code: 'USA'
   },
   {
     name: 'Mexico',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/mx.svg',
+    flag: '/flags/mexico.svg',
     code: 'MEX'
   },
   {
     name: 'Japan',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/jp.svg',
+    flag: '/flags/japan.svg',
     code: 'JPN'
   },
   {
     name: 'Argentina',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/ar.svg',
+    flag: '/flags/argentina.svg',
     code: 'ARG'
   },
   {
     name: 'Uzbekistan',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/uz.svg',
+    flag: '/flags/uzbekistan.svg',
     code: 'UZB'
   },
   {
     name: 'South Korea',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/kr.svg',
+    flag: '/flags/south-korea.svg',
     code: 'KOR'
   },
   {
     name: 'Jordan',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/jo.svg',
+    flag: '/flags/jordan.svg',
     code: 'JOR'
   },
   {
     name: 'Ecuador',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/ec.svg',
+    flag: '/flags/ecuador.svg',
     code: 'ECU'
   },
   {
     name: 'Brazil',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/br.svg',
+    flag: '/flags/brazil.svg',
     code: 'BRA'
   },
   {
     name: 'New Zealand',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/nz.svg',
+    flag: '/flags/new-zealand.svg',
     code: 'NZL'
   },
   {
     name: 'Iran',
-    flag: 'https://flagicons.lipis.dev/flags/4x3/ir.svg',
+    flag: '/flags/iran.svg',
     code: 'IRN'
   }
 ];
